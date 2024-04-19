@@ -13,3 +13,6 @@ target_link_libraries(offset_view PUBLIC Kokkos::kokkos yakl)
 
 add_executable(lr_deep_copy lr_deep_copy.cxx)
 target_link_libraries(lr_deep_copy PUBLIC Kokkos::kokkos yakl)
+
+add_executable(view_rawptr view_rawptr.cxx)
+target_link_libraries(view_rawptr PUBLIC Kokkos::kokkos yakl)
