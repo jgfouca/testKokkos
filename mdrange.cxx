@@ -52,6 +52,12 @@ int main(int argc, char** argv)
     print_iteration(MDRangeP3R <>({0,0,0}, {dim1, dim2, dim3}), "MDRangeP3R",  2, 3, 4);
     print_iteration(MDRangeP3D <>({0,0,0}, {dim1, dim2, dim3}), "MDRangeP3D",  2, 3, 4);
 
+    print_iteration(MDRangeP3RL<>({0,0,0}, {dim1, dim2, dim3}, {1,1,1}), "MDRangeP3RL_tile", 2, 3, 4);
+    print_iteration(MDRangeP3LR<>({0,0,0}, {dim1, dim2, dim3}, {1,1,1}), "MDRangeP3LR_tile", 2, 3, 4);
+    print_iteration(MDRangeP3L <>({0,0,0}, {dim1, dim2, dim3}, {1,1,1}), "MDRangeP3L_tile",  2, 3, 4);
+    print_iteration(MDRangeP3R <>({0,0,0}, {dim1, dim2, dim3}, {1,1,1}), "MDRangeP3R_tile",  2, 3, 4);
+    print_iteration(MDRangeP3D <>({0,0,0}, {dim1, dim2, dim3}, {1,1,1}), "MDRangeP3D_tile",  2, 3, 4);
+
     std::cout << "Validating" << std::endl;
     for (int k = 0; k < dim3; ++k) {
       for (int j = 0; j < dim2; ++j) {
