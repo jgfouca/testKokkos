@@ -33,7 +33,7 @@ void func(const ViewT& view)
   using LayoutT = typename ViewT::array_layout;
   using MDRP_t  = MDRP<LayoutT>;
 
-  Kokkos::parallel_for( MDRP_t::get<2>({view.extent(0),view.extent(1)}), KOKKOS_LAMBDA (int i, int j) {
+  Kokkos::parallel_for( MDRP_t::template get<2>({view.extent(0),view.extent(1)}), KOKKOS_LAMBDA (int i, int j) {
       std::cout << view(i, j) << " ";
   });
   std::cout << std::endl;
