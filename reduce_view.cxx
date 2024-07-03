@@ -78,6 +78,18 @@ struct SumArray
   bool reference_scalar() const { return true; }
 };
 
+struct ReduceFunctor
+{
+  std::vector<view_t> views;
+
+  KOKKOS_INLINE_FUNCTION
+  void operator()(size_t i, ArrayType& accum)
+  {
+    auto curr_view = views[i];
+    accum += curr_view;
+  }
+};
+
 int main(int argc, char** argv)
 {
   Kokkos::initialize(argc, argv); {
@@ -92,21 +104,11 @@ int main(int argc, char** argv)
       view3(i) = i*3;
     }
 
-    std::vector<view_t> views = {view1, view2, view3};
+    ReduceFunctor rf;
+    rf.views = {view1, view2, view3};
 
     ArrayType accum_r = accum;
-    Kokkos::parallel_reduce(views.size(), KOKKOS_LAMBDA(size_t i, ArrayType& accum_inner) {
-        auto curr_view = views[i];
-        accum_inner += curr_view;
-      }, SumArray(accum_r));
-
-    // int accumi = 0;
-    // Kokkos::parallel_reduce(DIM, KOKKOS_LAMBDA(int i, int& accum_inner) {
-    //     auto curr_view = views[i];
-    //     accum_inner += curr_view(i);
-    //   }, accumi);
-
-    // cout << accumi << endl;
+    Kokkos::parallel_reduce(rf.views.size(), rf, SumArray(accum_r));
 
     for (int i = 0; i < DIM; ++i) {
       //cout << accum(i) << endl;
