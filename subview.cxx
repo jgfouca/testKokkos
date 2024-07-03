@@ -18,7 +18,7 @@ int main(int argc, char** argv)
       }
     }
 
-    Kokkos::View<int**> subv(orig_view, std::make_pair(0, 2), Kokkos::ALL);
+    Kokkos::View<int**> subv(orig_view, std::make_pair(2, 4), Kokkos::ALL);
     for (size_t i = 0; i < subv.extent(0); ++i) {
       for (size_t j = 0; j < subv.extent(1); ++j) {
         std::cout << "subv(" << i << ", " << j << ") = " << subv(i, j) << std::endl;
