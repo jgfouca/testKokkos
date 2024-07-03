@@ -109,8 +109,8 @@ int main(int argc, char** argv)
     // cout << accumi << endl;
 
     for (int i = 0; i < DIM; ++i) {
-      cout << accum(i) << endl;
-      //cout << accum_r.m_data[i] << endl;
+      //cout << accum(i) << endl;
+      cout << accum_r.m_data[i] << endl;
     }
 
   }
