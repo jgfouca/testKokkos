@@ -83,7 +83,7 @@ struct ReduceFunctor
   std::vector<view_t> views;
 
   KOKKOS_INLINE_FUNCTION
-  void operator()(size_t i, ArrayType& accum)
+  void operator()(size_t i, ArrayType& accum) const
   {
     auto curr_view = views[i];
     accum += curr_view;
