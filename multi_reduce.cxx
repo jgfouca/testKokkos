@@ -28,16 +28,39 @@ int main(int argc, char** argv)
     }
 
     pair_t sum = {0, 0};
-    Kokkos::parallel_reduce(DIM, KOKKOS_LAMBDA(const int i, pair_t& sum_inner) {
-      const int item = view1(i);
-      sum_inner.first += item;
-      if (item == 2) {
-        sum_inner.second = i;
-      }
-    }, Kokkos::Sum<pair_t>(sum));
+    // Doesn't work using pairs directly
+    // Kokkos::parallel_reduce(DIM, KOKKOS_LAMBDA(const int i, pair_t& sum_inner) {
+    //   const int item = view1(i);
+    //   sum_inner.first += item;
+    //   if (item == 2) {
+    //     sum_inner.second = i;
+    //   }
+    // }, Kokkos::Sum<pair_t>(sum));
 
+    Kokkos::parallel_reduce(DIM, KOKKOS_LAMBDA(const int i, int& sum_inner1, int& sum_inner2) {
+      const int item = view1(i);
+      sum_inner1 += item;
+      if (item == 2) {
+        sum_inner2 = i;
+      }
+      }, sum.first, sum.second);
+
+    std::cout << "First run: " << std::endl;
     std::cout << "Sum is: " << sum.first  << std::endl;
     std::cout << "Idx is: " << sum.second << std::endl;
+
+    Kokkos::parallel_reduce(DIM, KOKKOS_LAMBDA(const int i, int& sum_inner1, int& sum_inner2) {
+      const int item = view1(i);
+      sum_inner1 += item;
+      if (item == 2) {
+        sum_inner2 = i;
+      }
+    }, sum.first, sum.second);
+
+    std::cout << "First run: " << std::endl;
+    std::cout << "Sum is: " << sum.first  << std::endl;
+    std::cout << "Idx is: " << sum.second << std::endl;
+
   }
   Kokkos::finalize();
   return 0;
