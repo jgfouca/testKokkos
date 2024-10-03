@@ -55,11 +55,18 @@ void unflatten_idx(const int idx, const Kokkos::Array<int, 3>& dims, int& i, int
 }
 
 KOKKOS_INLINE_FUNCTION
+void unflatten_idx(const int idx, const Kokkos::Array<int, 4>& dims, int& i, int& j, int& k, int& l)
+{
+  i = idx / (dims[3]*dims[2]*dims[1]);
+  j = (idx / (dims[3]*dims[2])) % dims[1];
+  k = (idx / dims[3]) % dims[2];
+  l = idx % dims[3];
+}
+
+
+KOKKOS_INLINE_FUNCTION
 void unflatten_idx_rev(const int idx, const Kokkos::Array<int, 3>& dims, int& i, int& j, int& k)
 {
-  // i = (idx / dims[2]) / dims[1];
-  // j = (idx / dims[2]) % dims[1];
-  // k =  idx % dims[2];
   i = idx % dims[0];
   j = (idx / dims[0]) % dims[1];
   k = (idx / dims[0]) / dims[1];
@@ -86,6 +93,19 @@ void print_iteration_flat_rev(int dim1, int dim2, int dim3)
     int i, j, k;
     unflatten_idx_rev(idx, dims, i, j, k);
     cout << "  Iterating (" << i << ", " << j << ", " << k << ")" << endl;
+  });
+}
+
+
+void print_iteration_flat4(int dim1, int dim2, int dim3, int dim4)
+{
+  const int tot = dim1*dim2*dim3*dim4;
+  Kokkos::Array<int, 4> dims = {dim1, dim2, dim3, dim4};
+  std::cout << "Iterating flat" << std::endl;
+  Kokkos::parallel_for(tot, KOKKOS_LAMBDA(int idx) {
+    int i, j, k, l;
+    unflatten_idx(idx, dims, i, j, k, l);
+    cout << "  Iterating (" << i << ", " << j << ", " << k << ", " << l << ")" << endl;
   });
 }
 
@@ -126,6 +146,8 @@ int main(int argc, char** argv)
     parallel_for( YAKL_AUTO_LABEL() , SimpleBounds<3>(dim1, dim2, dim3) , YAKL_LAMBDA (int i, int j, int k) {
       cout << "  Iterating (" << i-1 << ", " << j-1 << ", " << k-1 << ")" << endl;
     });
+
+    print_iteration_flat4(2, 3, 4, 5);
   }
   Kokkos::finalize();
   return 0;
