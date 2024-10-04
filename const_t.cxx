@@ -34,6 +34,7 @@ using namespace std;
 //   std::cout << std::endl;
 // }
 
+// Works
 void func(Kokkos::View<const int**> const& arg)
 {
   for (size_t i = 0; i < arg.size(); ++i) {
@@ -41,7 +42,6 @@ void func(Kokkos::View<const int**> const& arg)
   }
   std::cout << std::endl;
 }
-
 
 // Doesn't work, cannot deduce
 // template<typename T, typename Layout, typename Device, typename Traits>
@@ -59,7 +59,7 @@ int main(int argc, char** argv)
     Kokkos::View<int**> data("data", 2, 4);
     Kokkos::View<const int**> data2 = data;
     Kokkos::deep_copy(data, 1);
-    //func(data);
+    func(data);
     func(data2);
   }
   Kokkos::finalize();
