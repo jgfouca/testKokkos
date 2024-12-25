@@ -128,12 +128,13 @@ int main(int argc, char** argv)
 
     //func(orig_view);
     func2(orig_view);
+    Kokkos::fence();
 
     auto hostm = Kokkos::create_mirror_view(orig_view);
     Kokkos::deep_copy(hostm, orig_view);
 
     for (size_t i = 0; i < hostm.extent(0); ++i) {
-      for (size_t j = 0; j < hostm.extent(0); ++j) {
+      for (size_t j = 0; j < hostm.extent(1); ++j) {
         std::cout << hostm(i, j) << std::endl;
       }
     }
