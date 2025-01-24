@@ -40,14 +40,14 @@ void print_iteration(T policy, const std::string& name, int dim1, int dim2, int 
 }
 
 KOKKOS_INLINE_FUNCTION
-void unflatten_idx(const int idx, const Kokkos::Array<int, 2>& dims, int& i, int& j)
+void unflatten_idx_right(const int idx, const Kokkos::Array<int, 2>& dims, int& i, int& j)
 {
   i = idx / dims[1];
   j = idx % dims[1];
 }
 
 KOKKOS_INLINE_FUNCTION
-void unflatten_idx(const int idx, const Kokkos::Array<int, 3>& dims, int& i, int& j, int& k)
+void unflatten_idx_right(const int idx, const Kokkos::Array<int, 3>& dims, int& i, int& j, int& k)
 {
   i = idx / (dims[2] * dims[1]);
   j = (idx / dims[2]) % dims[1];
@@ -55,15 +55,7 @@ void unflatten_idx(const int idx, const Kokkos::Array<int, 3>& dims, int& i, int
 }
 
 KOKKOS_INLINE_FUNCTION
-void unflatten_idx_rev(const int idx, const Kokkos::Array<int, 3>& dims, int& i, int& j, int& k)
-{
-  i = idx % dims[0];
-  j = (idx / dims[0]) % dims[1];
-  k = idx / (dims[0] * dims[1]);
-}
-
-KOKKOS_INLINE_FUNCTION
-void unflatten_idx(const int idx, const Kokkos::Array<int, 4>& dims, int& i, int& j, int& k, int& l)
+void unflatten_idx_right(const int idx, const Kokkos::Array<int, 4>& dims, int& i, int& j, int& k, int& l)
 {
   i = idx / (dims[3]*dims[2]*dims[1]);
   j = (idx / (dims[3]*dims[2])) % dims[1];
@@ -72,12 +64,75 @@ void unflatten_idx(const int idx, const Kokkos::Array<int, 4>& dims, int& i, int
 }
 
 KOKKOS_INLINE_FUNCTION
-void unflatten_idx_rev(const int idx, const Kokkos::Array<int, 4>& dims, int& i, int& j, int& k, int& l)
+void unflatten_idx_left(const int idx, const Kokkos::Array<int, 2>& dims, int& i, int& j)
+{
+  i = idx % dims[0];
+  j = idx / dims[0];
+}
+
+KOKKOS_INLINE_FUNCTION
+void unflatten_idx_left(const int idx, const Kokkos::Array<int, 3>& dims, int& i, int& j, int& k)
+{
+  i = idx % dims[0];
+  j = (idx / dims[0]) % dims[1];
+  k = idx / (dims[0] * dims[1]);
+}
+
+KOKKOS_INLINE_FUNCTION
+void unflatten_idx_left(const int idx, const Kokkos::Array<int, 4>& dims, int& i, int& j, int& k, int& l)
 {
   i = idx % dims[0];
   j = (idx / dims[0]) % dims[1];
   k = (idx / (dims[0]*dims[1])) % dims[2];
   l = idx / (dims[0]*dims[1]*dims[2]);
+}
+
+KOKKOS_INLINE_FUNCTION
+void unflatten_idx_left(const int idx, const int d0, const int d1, int& i, int& j)
+{
+  i = idx % d0;
+  j = idx / d0;
+}
+
+KOKKOS_INLINE_FUNCTION
+void unflatten_idx_left(const int idx, const int d0, const int d1, const int d2, int& i, int& j, int& k)
+{
+  i = idx % d0;
+  j = (idx / d0) % d1;
+  k = idx / (d0 * d1);
+}
+
+KOKKOS_INLINE_FUNCTION
+void unflatten_idx_left(const int idx, const int d0, const int d1, const int d2, const int d3, int& i, int& j, int& k, int& l)
+{
+  i = idx % d0;
+  j = (idx / d0) % d1;
+  k = (idx / (d0*d1)) % d2;
+  l = idx / (d0*d1*d2);
+}
+
+KOKKOS_INLINE_FUNCTION
+void unflatten_idx_right(const int idx, const int d0, const int d1, int& i, int& j)
+{
+  i = idx / d1;
+  j = idx % d1;
+}
+
+KOKKOS_INLINE_FUNCTION
+void unflatten_idx_right(const int idx, const int d0, const int d1, const int d2, int& i, int& j, int& k)
+{
+  i = idx / (d2 * d1);
+  j = (idx / d2) % d1;
+  k =  idx % d2;
+}
+
+KOKKOS_INLINE_FUNCTION
+void unflatten_idx_right(const int idx, const int d0, const int d1, const int d2, const int d3, int& i, int& j, int& k, int& l)
+{
+  i = idx / (d3*d2*d1);
+  j = (idx / (d3*d2)) % d1;
+  k = (idx / d3) % d2;
+  l = idx % d3;
 }
 
 int main(int argc, char** argv)
@@ -111,13 +166,44 @@ int main(int argc, char** argv)
     });
 
     std::cout << "Validating unflattens" << std::endl;
-    Kokkos::Array<int, 3> dims3 = {dim1, dim2, dim3};
+    Kokkos::Array<int, 2> dims2 = {dim1, dim2};
     int idx = 0;
+    for (int i = 0; i < dim1; ++i) {
+      for (int j = 0; j < dim2; ++j, ++idx) {
+        int iv, jv;
+        unflatten_idx_right(idx, dims2, iv, jv);
+        assert(j == jv);
+        assert(i == iv);
+        unflatten_idx_right(idx, dims2[0], dims2[1], iv, jv);
+        assert(j == jv);
+        assert(i == iv);
+      }
+    }
+
+    idx = 0;
+    for (int j = 0; j < dim2; ++j) {
+      for (int i = 0; i < dim1; ++i, ++idx) {
+        int iv, jv;
+        unflatten_idx_left(idx, dims2, iv, jv);
+        assert(j == jv);
+        assert(i == iv);
+        unflatten_idx_left(idx, dims2[0], dims2[1], iv, jv);
+        assert(j == jv);
+        assert(i == iv);
+      }
+    }
+
+    Kokkos::Array<int, 3> dims3 = {dim1, dim2, dim3};
+    idx = 0;
     for (int i = 0; i < dim1; ++i) {
       for (int j = 0; j < dim2; ++j) {
         for (int k = 0; k < dim3; ++k, ++idx) {
           int iv, jv, kv;
-          unflatten_idx(idx, dims3, iv, jv, kv);
+          unflatten_idx_right(idx, dims3, iv, jv, kv);
+          assert(k == kv);
+          assert(j == jv);
+          assert(i == iv);
+          unflatten_idx_right(idx, dims3[0], dims3[1], dims3[2], iv, jv, kv);
           assert(k == kv);
           assert(j == jv);
           assert(i == iv);
@@ -130,7 +216,11 @@ int main(int argc, char** argv)
       for (int j = 0; j < dim2; ++j) {
         for (int i = 0; i < dim1; ++i, ++idx) {
           int iv, jv, kv;
-          unflatten_idx_rev(idx, dims3, iv, jv, kv);
+          unflatten_idx_left(idx, dims3, iv, jv, kv);
+          assert(k == kv);
+          assert(j == jv);
+          assert(i == iv);
+          unflatten_idx_left(idx, dims3[0], dims3[1], dims3[2], iv, jv, kv);
           assert(k == kv);
           assert(j == jv);
           assert(i == iv);
@@ -146,7 +236,12 @@ int main(int argc, char** argv)
         for (int k = 0; k < dim3; ++k) {
           for (int l = 0; l < dim4; ++l, ++idx) {
             int iv, jv, kv, lv;
-            unflatten_idx(idx, dims4, iv, jv, kv, lv);
+            unflatten_idx_right(idx, dims4, iv, jv, kv, lv);
+            assert(l == lv);
+            assert(k == kv);
+            assert(j == jv);
+            assert(i == iv);
+            unflatten_idx_right(idx, dims4[0], dims4[1], dims4[2], dims4[3], iv, jv, kv, lv);
             assert(l == lv);
             assert(k == kv);
             assert(j == jv);
@@ -162,7 +257,12 @@ int main(int argc, char** argv)
         for (int j = 0; j < dim2; ++j) {
           for (int i = 0; i < dim1; ++i, ++idx) {
             int iv, jv, kv, lv;
-            unflatten_idx_rev(idx, dims4, iv, jv, kv, lv);
+            unflatten_idx_left(idx, dims4, iv, jv, kv, lv);
+            assert(l == lv);
+            assert(k == kv);
+            assert(j == jv);
+            assert(i == iv);
+            unflatten_idx_left(idx, dims4[0], dims4[1], dims4[2], dims4[3], iv, jv, kv, lv);
             assert(l == lv);
             assert(k == kv);
             assert(j == jv);
