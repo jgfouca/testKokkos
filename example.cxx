@@ -40,6 +40,9 @@ using r1dk = Kokkos::View<double*,   layout_t, DefaultDevice>;
 using r2dk = Kokkos::View<double**,  layout_t, DefaultDevice>;
 using r3dk = Kokkos::View<double***, layout_t, DefaultDevice>;
 
+#define YLAM YAKL_LAMBDA
+#define KLAM KOKKOS_LAMBDA
+
 namespace conv {
 
 KOKKOS_INLINE_FUNCTION
@@ -126,20 +129,79 @@ struct MemPoolSingleton
   template <typename T>
   using view_t = Kokkos::View<T, LayoutT, DeviceT>;
 
+  using memview_t = view_t<RealT*>;
+
+  static inline memview_t  s_mem;
+  static inline int64_t s_curr_used;
+  static inline int64_t s_high_water;
+
+  static void init(const int64_t capacity)
+  {
+    static bool is_init = false;
+    assert(!is_init);
+    s_mem = memview_t("s_mem", capacity);
+    s_curr_used = 0;
+    s_high_water = 0;
+  }
+
+  template <typename T>
+  static inline
+  int64_t get_num_reals(const int64_t num) noexcept
+  {
+    assert(sizeof(T) <= sizeof(RealT));
+    static constexpr int64_t CACHE_LINE_SIZE = 64;
+    static constexpr int64_t reals_per_cache_line = CACHE_LINE_SIZE / sizeof(RealT);
+    const int64_t num_reals = ((num * sizeof(T) + (sizeof(RealT) - 1)) / sizeof(RealT));
+    // + reals_per_cache_line; // pad. This didn't seem to help at all
+    const int64_t num_reals_cache_aligned = ((num_reals + reals_per_cache_line - 1) / reals_per_cache_line) * reals_per_cache_line;
+    return num_reals_cache_aligned;
+  }
+
+  template <typename T>
+  static inline
+  T* alloc_raw(const int64_t num) noexcept
+  {
+    const int64_t num_reals = get_num_reals<T>(num);
+    T* rv = reinterpret_cast<T*>(s_mem.data() + s_curr_used);
+    s_curr_used += num_reals;
+    assert(s_curr_used <= s_mem.size());
+    if (s_curr_used > s_high_water) {
+      s_high_water = s_curr_used;
+    }
+    return rv;
+  }
+
   template <typename T>
   static inline
   auto alloc(const int64_t dim1, const int64_t dim2) noexcept
   {
     using uview_t = Unmanaged<view_t<T**>>;
-    static_assert(uview_t::rank == 2);
-    return uview_t();
+    return uview_t(alloc_raw<T>(dim1*dim2), dim1, dim2);
+  }
+
+  template <typename T>
+  static inline
+  void dealloc(const T*, const int64_t num) noexcept
+  {
+    const int64_t num_reals = get_num_reals<T>(num);
+    s_curr_used -= num_reals;
+    assert(s_curr_used >= 0);
   }
 
   template <typename View>
   static inline
   void dealloc(const View& view) noexcept
   {
+    dealloc(view.data(), view.size());
   }
+
+  static inline
+  void finalize()
+  {
+    assert(s_curr_used == 0); // !=0 indicates we may have forgotten a dealloc
+    s_mem = memview_t();
+  }
+
 };
 
 }
@@ -155,7 +217,7 @@ void example_orig(
   using yakl::fortran::parallel_for;
   using yakl::fortran::SimpleBounds;
   r2d temp_dn("tmp_dn", ncol, ngpt);
-  parallel_for( YAKL_AUTO_LABEL() , SimpleBounds<2>(ngpt,ncol) , YAKL_LAMBDA (int igpt, int icol) {
+  parallel_for( YAKL_AUTO_LABEL() , SimpleBounds<2>(ngpt,ncol) , YLAM(int igpt, int icol) {
     // Downward propagation
     for (int ilev=2; ilev<=nlay+1; ilev++) {
       D(icol,ilev,igpt) = t(icol,ilev-1,igpt)*D(icol,ilev-1,igpt) + d(icol,ilev-1,igpt);
@@ -180,7 +242,7 @@ void example_final(
   using yakl::fortran::parallel_for;
   using yakl::fortran::SimpleBounds;
   r2d temp_dn("tmp_dn", ncol, ngpt);
-  TIMED_KERNEL(parallel_for( YAKL_AUTO_LABEL() , SimpleBounds<2>(ngpt,ncol) , YAKL_LAMBDA (int igpt, int icol) {
+  TIMED_KERNEL(parallel_for( YAKL_AUTO_LABEL() , SimpleBounds<2>(ngpt,ncol) , YLAM(int igpt, int icol) {
     // Downward propagation
     for (int ilev=2; ilev<=nlay+1; ilev++) {
       D(icol,ilev,igpt) = t(icol,ilev-1,igpt)*D(icol,ilev-1,igpt) + d(icol,ilev-1,igpt);
@@ -206,7 +268,7 @@ void example_orig(
   using MDRPR_t = Kokkos::MDRangePolicy<exe_space_t, Kokkos::Rank<2, Kokkos::Iterate::Left, Kokkos::Iterate::Right> >;
 
   r2dk temp_dn("temp_dn", ncol, ngpt);
-  Kokkos::parallel_for( MDRPR_t({0, 0}, {ngpt,ncol}) , KOKKOS_LAMBDA (int igpt, int icol) {
+  Kokkos::parallel_for( MDRPR_t({0, 0}, {ngpt,ncol}) , KLAM(int igpt, int icol) {
     // Downward propagation
     for (int ilev=1; ilev<nlay+1; ilev++) {
       D(icol,ilev,igpt) = t(icol,ilev-1,igpt)*D(icol,ilev-1,igpt) + d(icol,ilev-1,igpt);
@@ -231,7 +293,7 @@ void example_mdrp(
   using mdrp_t  = typename conv::MDRP<>;
 
   r2dk temp_dn("temp_dn", ncol, ngpt);
-  Kokkos::parallel_for( mdrp_t::template get<2>({ngpt,ncol}) , KOKKOS_LAMBDA (int igpt, int icol) {
+  Kokkos::parallel_for( mdrp_t::template get<2>({ngpt,ncol}) , KLAM(int igpt, int icol) {
     // Downward propagation
     for (int ilev=1; ilev<nlay+1; ilev++) {
       D(icol,ilev,igpt) = t(icol,ilev-1,igpt)*D(icol,ilev-1,igpt) + d(icol,ilev-1,igpt);
@@ -256,7 +318,7 @@ void example_mdrp_layout(
   using mdrp_t  = typename conv::MDRP<layout_t>;
 
   r2dk temp_dn("temp_dn", ncol, ngpt);
-  Kokkos::parallel_for( mdrp_t::template get<2>({ncol,ngpt}) , KOKKOS_LAMBDA (int icol, int igpt) {
+  Kokkos::parallel_for( mdrp_t::template get<2>({ncol,ngpt}) , KLAM(int icol, int igpt) {
     // Downward propagation
     for (int ilev=1; ilev<nlay+1; ilev++) {
       D(icol,ilev,igpt) = t(icol,ilev-1,igpt)*D(icol,ilev-1,igpt) + d(icol,ilev-1,igpt);
@@ -282,7 +344,7 @@ void example_pool(
   using mdrp_t = typename conv::MDRP<layout_t>;
 
   auto temp_dn  = pool_t::template alloc<double>(ncol,ngpt);
-  Kokkos::parallel_for( mdrp_t::template get<2>({ncol,ngpt}) , KOKKOS_LAMBDA (int icol, int igpt) {
+  Kokkos::parallel_for( mdrp_t::template get<2>({ncol,ngpt}) , KLAM(int icol, int igpt) {
     // Downward propagation
     for (int ilev=1; ilev<nlay+1; ilev++) {
       D(icol,ilev,igpt) = t(icol,ilev-1,igpt)*D(icol,ilev-1,igpt) + d(icol,ilev-1,igpt);
@@ -399,15 +461,23 @@ void example_timing(
 int main(int argc, char** argv)
 {
   Kokkos::initialize(argc, argv); {
-    r2dk a, s;
-    r3dk t, d, u, U, D;
-    example_orig(1, 2, 3, t, a, d, u, s, U, D);
-    example_mdrp(1, 2, 3, t, a, d, u, s, U, D);
-    example_mdrp_layout(1, 2, 3, t, a, d, u, s, U, D);
-    example_pool(1, 2, 3, t, a, d, u, s, U, D);
-    example_wrap(1, 2, 3, t, a, d, u, s, U, D);
-    example_generic(1, 2, 3, t, a, d, u, s, U, D);
-    example_timing(1, 2, 3, t, a, d, u, s, U, D);
+    using pool_t = conv::MemPoolSingleton<>;
+    pool_t::init(10000);
+    int ncol = 8, nlay = 12, ngpt = 14;
+    r2dk a("a", ncol, ngpt), s("s", ncol, ngpt);
+    r3dk t("t", ncol, nlay, ngpt),
+      d("d", ncol, nlay, ngpt),
+      u("u", ncol, nlay, ngpt),
+      U("U", ncol, nlay+1, ngpt),
+      D("D", ncol, nlay+1, ngpt);
+    example_orig(ncol, nlay, ngpt, t, a, d, u, s, U, D);
+    example_mdrp(ncol, nlay, ngpt, t, a, d, u, s, U, D);
+    example_mdrp_layout(ncol, nlay, ngpt, t, a, d, u, s, U, D);
+    example_pool(ncol, nlay, ngpt, t, a, d, u, s, U, D);
+    example_wrap(ncol, nlay, ngpt, t, a, d, u, s, U, D);
+    example_generic(ncol, nlay, ngpt, t, a, d, u, s, U, D);
+    example_timing(ncol, nlay, ngpt, t, a, d, u, s, U, D);
+    pool_t::finalize();
   }
   Kokkos::finalize();
   return 0;
