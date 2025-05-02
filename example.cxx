@@ -16,30 +16,59 @@ using HostDevice =
   kernel;                                                               \
 }
 
-#define MD_KERNEL2(n1, n2, i1, i2, kernel)      \
-  {                                                             \
+#define MD_KERNEL2(n1, n2, i1, i2, kernel)                      \
+  {                                                                     \
     Kokkos::Array<int, 2> dims_fmk_internal = {n1, n2};                 \
     const int dims_fmk_internal_tot = (n1)*(n2);                        \
     Kokkos::parallel_for(dims_fmk_internal_tot, KOKKOS_LAMBDA (int idx_fmk_internal) { \
-      });                                                               \
+      int i1, i2;                                                     \
+      conv::unflatten_idx<layout_t>(idx_fmk_internal, dims_fmk_internal, i1, i2); \
+      kernel;                                                           \
+    });                                                                 \
   }
 
 template <class T, int rank, int myMem> using FArray = yakl::Array<T,rank,myMem,yakl::styleFortran>;
 
-using real1d = FArray<double,1,yakl::memDevice>;
-using real2d = FArray<double,2,yakl::memDevice>;
-using real3d = FArray<double,3,yakl::memDevice>;
+using r1d = FArray<double,1,yakl::memDevice>;
+using r2d = FArray<double,2,yakl::memDevice>;
+using r3d = FArray<double,3,yakl::memDevice>;
 
 using layout_t = Kokkos::LayoutRight;
 using device_t = DefaultDevice;
 
-using real1dk = Kokkos::View<double*,   layout_t, DefaultDevice>;
-using real2dk = Kokkos::View<double**,  layout_t, DefaultDevice>;
-using real3dk = Kokkos::View<double***, layout_t, DefaultDevice>;
+using r1dk = Kokkos::View<double*,   layout_t, DefaultDevice>;
+using r2dk = Kokkos::View<double**,  layout_t, DefaultDevice>;
+using r3dk = Kokkos::View<double***, layout_t, DefaultDevice>;
 
 namespace conv {
 
-  // Copied from EKAT
+KOKKOS_INLINE_FUNCTION
+void unflatten_idx_left(const int idx, const Kokkos::Array<int, 2>& dims, int& i, int& j)
+{
+  i = idx % dims[0];
+  j = idx / dims[0];
+}
+
+KOKKOS_INLINE_FUNCTION
+void unflatten_idx_right(const int idx, const Kokkos::Array<int, 2>& dims, int& i, int& j)
+{
+  i = idx / dims[1];
+  j = idx % dims[1];
+}
+
+template <typename LayoutT>
+KOKKOS_INLINE_FUNCTION
+void unflatten_idx(const int idx, const Kokkos::Array<int, 2>& dims, int& i, int& j)
+{
+  if constexpr (std::is_same_v<LayoutT, Kokkos::LayoutLeft>) {
+    unflatten_idx_left(idx, dims, i, j);
+  }
+  else {
+    unflatten_idx_right(idx, dims, i, j);
+  }
+}
+
+// Copied from EKAT
 template <typename View>
 struct MemoryTraitsMask {
   enum : unsigned int {
@@ -102,6 +131,7 @@ struct MemPoolSingleton
   auto alloc(const int64_t dim1, const int64_t dim2) noexcept
   {
     using uview_t = Unmanaged<view_t<T**>>;
+    static_assert(uview_t::rank == 2);
     return uview_t();
   }
 
@@ -114,136 +144,139 @@ struct MemPoolSingleton
 
 }
 
-void lw_transport_noscat_orig(
-  int ncol, int nlay, int ngpt, real3d const &trans,
-  real2d const &sfc_albedo, real3d const &source_dn, real3d const &source_up, real2d const &source_sfc,
-  real3d const &radn_up, real3d const &radn_dn)
+////////////////////////////////////////////////////////////////////////////////
+// example is lw_transport_noscat
+
+void example_orig(
+  int ncol, int nlay, int ngpt,
+  r3d const &t, r2d const &a, r3d const &d, r3d const &u, r2d const &s,
+  r3d const &U, r3d const &D)
 {
   using yakl::fortran::parallel_for;
   using yakl::fortran::SimpleBounds;
-  real2d temp_dn("tmp_dn", ncol, ngpt);
+  r2d temp_dn("tmp_dn", ncol, ngpt);
   parallel_for( YAKL_AUTO_LABEL() , SimpleBounds<2>(ngpt,ncol) , YAKL_LAMBDA (int igpt, int icol) {
     // Downward propagation
     for (int ilev=2; ilev<=nlay+1; ilev++) {
-      radn_dn(icol,ilev,igpt) = trans(icol,ilev-1,igpt)*radn_dn(icol,ilev-1,igpt) + source_dn(icol,ilev-1,igpt);
-      temp_dn(icol,igpt) += radn_dn(icol,ilev,igpt);
+      D(icol,ilev,igpt) = t(icol,ilev-1,igpt)*D(icol,ilev-1,igpt) + d(icol,ilev-1,igpt);
+      temp_dn(icol,igpt) += D(icol,ilev,igpt);
     }
 
     // Surface reflection and emission
-    radn_up(icol,nlay+1,igpt) = radn_dn(icol,nlay+1,igpt)*sfc_albedo(icol,igpt) + source_sfc(icol,igpt);
+    U(icol,nlay+1,igpt) = D(icol,nlay+1,igpt)*a(icol,igpt) + s(icol,igpt);
 
     // Upward propagation
     for (int ilev=nlay; ilev>=1; ilev--) {
-      radn_up(icol,ilev,igpt) = trans(icol,ilev  ,igpt)*radn_up(icol,ilev+1,igpt) + source_up(icol,ilev,igpt);
+      U(icol,ilev,igpt) = t(icol,ilev,igpt)*U(icol,ilev+1,igpt) + u(icol,ilev,igpt);
     }
   });
 }
 
-void lw_transport_noscat_final(
-  int ncol, int nlay, int ngpt, real3d const &trans,
-  real2d const &sfc_albedo, real3d const &source_dn, real3d const &source_up, real2d const &source_sfc,
-  real3d const &radn_up, real3d const &radn_dn)
+void example_final(
+  int ncol, int nlay, int ngpt,
+  r3d const &t, r2d const &a, r3d const &d, r3d const &u, r2d const &s,
+  r3d const &U, r3d const &D)
 {
   using yakl::fortran::parallel_for;
   using yakl::fortran::SimpleBounds;
-  real2d temp_dn("tmp_dn", ncol, ngpt);
+  r2d temp_dn("tmp_dn", ncol, ngpt);
   TIMED_KERNEL(parallel_for( YAKL_AUTO_LABEL() , SimpleBounds<2>(ngpt,ncol) , YAKL_LAMBDA (int igpt, int icol) {
     // Downward propagation
     for (int ilev=2; ilev<=nlay+1; ilev++) {
-      radn_dn(icol,ilev,igpt) = trans(icol,ilev-1,igpt)*radn_dn(icol,ilev-1,igpt) + source_dn(icol,ilev-1,igpt);
-      temp_dn(icol,igpt) += radn_dn(icol,ilev,igpt);
+      D(icol,ilev,igpt) = t(icol,ilev-1,igpt)*D(icol,ilev-1,igpt) + d(icol,ilev-1,igpt);
+      temp_dn(icol,igpt) += D(icol,ilev,igpt);
     }
 
     // Surface reflection and emission
-    radn_up(icol,nlay+1,igpt) = radn_dn(icol,nlay+1,igpt)*sfc_albedo(icol,igpt) + source_sfc(icol,igpt);
+    U(icol,nlay+1,igpt) = D(icol,nlay+1,igpt)*a(icol,igpt) + s(icol,igpt);
 
     // Upward propagation
     for (int ilev=nlay; ilev>=1; ilev--) {
-      radn_up(icol,ilev,igpt) = trans(icol,ilev  ,igpt)*radn_up(icol,ilev+1,igpt) + source_up(icol,ilev,igpt);
+      U(icol,ilev,igpt) = t(icol,ilev,igpt)*U(icol,ilev+1,igpt) + u(icol,ilev,igpt);
     }
   }));
 }
 
-void lw_transport_noscat_orig(
-  int ncol, int nlay, int ngpt, real3dk const &trans,
-  real2dk const &sfc_albedo, real3dk const &source_dn, real3dk const &source_up,
-  real2dk const &source_sfc, real3dk const &radn_up, real3dk const &radn_dn)
+void example_orig(
+  int ncol, int nlay, int ngpt,
+  r3dk const &t, r2dk const &a, r3dk const &d, r3dk const &u, r2dk const &s,
+  r3dk const &U, r3dk const &D)
 {
   using exe_space_t = Kokkos::DefaultExecutionSpace;
   using MDRPR_t = Kokkos::MDRangePolicy<exe_space_t, Kokkos::Rank<2, Kokkos::Iterate::Left, Kokkos::Iterate::Right> >;
 
-  real2dk temp_dn("temp_dn", ncol, ngpt);
+  r2dk temp_dn("temp_dn", ncol, ngpt);
   Kokkos::parallel_for( MDRPR_t({0, 0}, {ngpt,ncol}) , KOKKOS_LAMBDA (int igpt, int icol) {
     // Downward propagation
     for (int ilev=1; ilev<nlay+1; ilev++) {
-      radn_dn(icol,ilev,igpt) = trans(icol,ilev-1,igpt)*radn_dn(icol,ilev-1,igpt) + source_dn(icol,ilev-1,igpt);
-      temp_dn(icol,igpt) += radn_dn(icol,ilev,igpt);
+      D(icol,ilev,igpt) = t(icol,ilev-1,igpt)*D(icol,ilev-1,igpt) + d(icol,ilev-1,igpt);
+      temp_dn(icol,igpt) += D(icol,ilev,igpt);
     }
 
     // Surface reflection and emission
-    radn_up(icol,nlay,igpt) = radn_dn(icol,nlay,igpt)*sfc_albedo(icol,igpt) + source_sfc(icol,igpt);
+    U(icol,nlay,igpt) = D(icol,nlay,igpt)*a(icol,igpt) + s(icol,igpt);
 
     // Upward propagation
     for (int ilev=nlay-1; ilev>=0; ilev--) {
-      radn_up(icol,ilev,igpt) = trans(icol,ilev  ,igpt)*radn_up(icol,ilev+1,igpt) + source_up(icol,ilev,igpt);
+      U(icol,ilev,igpt) = t(icol,ilev,igpt)*U(icol,ilev+1,igpt) + u(icol,ilev,igpt);
     }
   });
 }
 
-void lw_transport_noscat_mdrp(
-  int ncol, int nlay, int ngpt, real3dk const &trans,
-  real2dk const &sfc_albedo, real3dk const &source_dn, real3dk const &source_up,
-  real2dk const &source_sfc, real3dk const &radn_up, real3dk const &radn_dn)
+void example_mdrp(
+  int ncol, int nlay, int ngpt,
+  r3dk const &t, r2dk const &a, r3dk const &d, r3dk const &u, r2dk const &s,
+  r3dk const &U, r3dk const &D)
 {
   using mdrp_t  = typename conv::MDRP<>;
 
-  real2dk temp_dn("temp_dn", ncol, ngpt);
+  r2dk temp_dn("temp_dn", ncol, ngpt);
   Kokkos::parallel_for( mdrp_t::template get<2>({ngpt,ncol}) , KOKKOS_LAMBDA (int igpt, int icol) {
     // Downward propagation
     for (int ilev=1; ilev<nlay+1; ilev++) {
-      radn_dn(icol,ilev,igpt) = trans(icol,ilev-1,igpt)*radn_dn(icol,ilev-1,igpt) + source_dn(icol,ilev-1,igpt);
-      temp_dn(icol,igpt) += radn_dn(icol,ilev,igpt);
+      D(icol,ilev,igpt) = t(icol,ilev-1,igpt)*D(icol,ilev-1,igpt) + d(icol,ilev-1,igpt);
+      temp_dn(icol,igpt) += D(icol,ilev,igpt);
     }
 
     // Surface reflection and emission
-    radn_up(icol,nlay,igpt) = radn_dn(icol,nlay,igpt)*sfc_albedo(icol,igpt) + source_sfc(icol,igpt);
+    U(icol,nlay,igpt) = D(icol,nlay,igpt)*a(icol,igpt) + s(icol,igpt);
 
     // Upward propagation
     for (int ilev=nlay-1; ilev>=0; ilev--) {
-      radn_up(icol,ilev,igpt) = trans(icol,ilev  ,igpt)*radn_up(icol,ilev+1,igpt) + source_up(icol,ilev,igpt);
+      U(icol,ilev,igpt) = t(icol,ilev,igpt)*U(icol,ilev+1,igpt) + u(icol,ilev,igpt);
     }
   });
 }
 
-void lw_transport_noscat_mdrp_layout(
-  int ncol, int nlay, int ngpt, real3dk const &trans,
-  real2dk const &sfc_albedo, real3dk const &source_dn, real3dk const &source_up,
-  real2dk const &source_sfc, real3dk const &radn_up, real3dk const &radn_dn)
+void example_mdrp_layout(
+  int ncol, int nlay, int ngpt,
+  r3dk const &t, r2dk const &a, r3dk const &d, r3dk const &u, r2dk const &s,
+  r3dk const &U, r3dk const &D)
 {
   using mdrp_t  = typename conv::MDRP<layout_t>;
 
-  real2dk temp_dn("temp_dn", ncol, ngpt);
+  r2dk temp_dn("temp_dn", ncol, ngpt);
   Kokkos::parallel_for( mdrp_t::template get<2>({ncol,ngpt}) , KOKKOS_LAMBDA (int icol, int igpt) {
     // Downward propagation
     for (int ilev=1; ilev<nlay+1; ilev++) {
-      radn_dn(icol,ilev,igpt) = trans(icol,ilev-1,igpt)*radn_dn(icol,ilev-1,igpt) + source_dn(icol,ilev-1,igpt);
-      temp_dn(icol,igpt) += radn_dn(icol,ilev,igpt);
+      D(icol,ilev,igpt) = t(icol,ilev-1,igpt)*D(icol,ilev-1,igpt) + d(icol,ilev-1,igpt);
+      temp_dn(icol,igpt) += D(icol,ilev,igpt);
     }
 
     // Surface reflection and emission
-    radn_up(icol,nlay,igpt) = radn_dn(icol,nlay,igpt)*sfc_albedo(icol,igpt) + source_sfc(icol,igpt);
+    U(icol,nlay,igpt) = D(icol,nlay,igpt)*a(icol,igpt) + s(icol,igpt);
 
     // Upward propagation
     for (int ilev=nlay-1; ilev>=0; ilev--) {
-      radn_up(icol,ilev,igpt) = trans(icol,ilev  ,igpt)*radn_up(icol,ilev+1,igpt) + source_up(icol,ilev,igpt);
+      U(icol,ilev,igpt) = t(icol,ilev,igpt)*U(icol,ilev+1,igpt) + u(icol,ilev,igpt);
     }
   });
 }
 
-void lw_transport_noscat_pool(
-  int ncol, int nlay, int ngpt, real3dk const &trans,
-  real2dk const &sfc_albedo, real3dk const &source_dn, real3dk const &source_up,
-  real2dk const &source_sfc, real3dk const &radn_up, real3dk const &radn_dn)
+void example_pool(
+  int ncol, int nlay, int ngpt,
+  r3dk const &t, r2dk const &a, r3dk const &d, r3dk const &u, r2dk const &s,
+  r3dk const &U, r3dk const &D)
 {
   using pool_t = conv::MemPoolSingleton<>;
   using mdrp_t = typename conv::MDRP<layout_t>;
@@ -252,26 +285,26 @@ void lw_transport_noscat_pool(
   Kokkos::parallel_for( mdrp_t::template get<2>({ncol,ngpt}) , KOKKOS_LAMBDA (int icol, int igpt) {
     // Downward propagation
     for (int ilev=1; ilev<nlay+1; ilev++) {
-      radn_dn(icol,ilev,igpt) = trans(icol,ilev-1,igpt)*radn_dn(icol,ilev-1,igpt) + source_dn(icol,ilev-1,igpt);
-      temp_dn(icol,igpt) += radn_dn(icol,ilev,igpt);
+      D(icol,ilev,igpt) = t(icol,ilev-1,igpt)*D(icol,ilev-1,igpt) + d(icol,ilev-1,igpt);
+      temp_dn(icol,igpt) += D(icol,ilev,igpt);
     }
 
     // Surface reflection and emission
-    radn_up(icol,nlay,igpt) = radn_dn(icol,nlay,igpt)*sfc_albedo(icol,igpt) + source_sfc(icol,igpt);
+    U(icol,nlay,igpt) = D(icol,nlay,igpt)*a(icol,igpt) + s(icol,igpt);
 
     // Upward propagation
     for (int ilev=nlay-1; ilev>=0; ilev--) {
-      radn_up(icol,ilev,igpt) = trans(icol,ilev  ,igpt)*radn_up(icol,ilev+1,igpt) + source_up(icol,ilev,igpt);
+      U(icol,ilev,igpt) = t(icol,ilev,igpt)*U(icol,ilev+1,igpt) + u(icol,ilev,igpt);
     }
   });
 
   pool_t::dealloc(temp_dn);
 }
 
-void lw_transport_noscat_wrap(
-  int ncol, int nlay, int ngpt, real3dk const &trans,
-  real2dk const &sfc_albedo, real3dk const &source_dn, real3dk const &source_up,
-  real2dk const &source_sfc, real3dk const &radn_up, real3dk const &radn_dn)
+void example_wrap(
+  int ncol, int nlay, int ngpt,
+  r3dk const &t, r2dk const &a, r3dk const &d, r3dk const &u, r2dk const &s,
+  r3dk const &U, r3dk const &D)
 {
   using pool_t = conv::MemPoolSingleton<>;
 
@@ -279,32 +312,32 @@ void lw_transport_noscat_wrap(
   MD_KERNEL2(ncol, ngpt, icol, igpt,
     // Downward propagation
     for (int ilev=1; ilev<nlay+1; ilev++) {
-      radn_dn(icol,ilev,igpt) = trans(icol,ilev-1,igpt)*radn_dn(icol,ilev-1,igpt) + source_dn(icol,ilev-1,igpt);
-      temp_dn(icol,igpt) += radn_dn(icol,ilev,igpt);
+      D(icol,ilev,igpt) = t(icol,ilev-1,igpt)*D(icol,ilev-1,igpt) + d(icol,ilev-1,igpt);
+      temp_dn(icol,igpt) += D(icol,ilev,igpt);
     }
 
     // Surface reflection and emission
-    radn_up(icol,nlay,igpt) = radn_dn(icol,nlay,igpt)*sfc_albedo(icol,igpt) + source_sfc(icol,igpt);
+    U(icol,nlay,igpt) = D(icol,nlay,igpt)*a(icol,igpt) + s(icol,igpt);
 
     // Upward propagation
     for (int ilev=nlay-1; ilev>=0; ilev--) {
-      radn_up(icol,ilev,igpt) = trans(icol,ilev  ,igpt)*radn_up(icol,ilev+1,igpt) + source_up(icol,ilev,igpt);
+      U(icol,ilev,igpt) = t(icol,ilev,igpt)*U(icol,ilev+1,igpt) + u(icol,ilev,igpt);
     }
-  });
+  );
 
   pool_t::dealloc(temp_dn);
 }
 
-template <typename TransT, typename SfcAlbedoT, typename SourceDnT, typename SourceUpT,
-          typename SourceSfcT, typename RadnUpT, typename RadnDnT>
-void lw_transport_noscat_generic(
-  int ncol, int nlay, int ngpt, TransT const &trans,
-  SfcAlbedoT const &sfc_albedo, SourceDnT const &source_dn, SourceUpT const &source_up,
-  SourceSfcT const &source_sfc, RadnUpT const &radn_up, RadnDnT const &radn_dn)
+template <typename TT, typename AT, typename DT, typename UT,
+          typename ST, typename RUT, typename RDT>
+void example_generic(
+  int ncol, int nlay, int ngpt,
+  TT const &t, AT const &a, DT const &d, UT const &u, ST const &s,
+  RUT const &U, RDT const &D)
 {
-  using scalar_t = typename TransT::non_const_data_type;
-  using layout_t = typename TransT::array_layout;
-  using device_t = typename TransT::device_type;
+  using scalar_t = typename TT::non_const_value_type;
+  using layout_t = typename TT::array_layout;
+  using device_t = typename TT::device_type;
 
   using pool_t = conv::MemPoolSingleton<scalar_t, layout_t, device_t>;
 
@@ -313,32 +346,32 @@ void lw_transport_noscat_generic(
   MD_KERNEL2(ncol, ngpt, icol, igpt,
     // Downward propagation
     for (int ilev=1; ilev<nlay+1; ilev++) {
-      radn_dn(icol,ilev,igpt) = trans(icol,ilev-1,igpt)*radn_dn(icol,ilev-1,igpt) + source_dn(icol,ilev-1,igpt);
-      temp_dn(icol,igpt) += radn_dn(icol,ilev,igpt);
+      D(icol,ilev,igpt) = t(icol,ilev-1,igpt)*D(icol,ilev-1,igpt) + d(icol,ilev-1,igpt);
+      temp_dn(icol,igpt) += D(icol,ilev,igpt);
     }
 
     // Surface reflection and emission
-    radn_up(icol,nlay,igpt) = radn_dn(icol,nlay,igpt)*sfc_albedo(icol,igpt) + source_sfc(icol,igpt);
+    U(icol,nlay,igpt) = D(icol,nlay,igpt)*a(icol,igpt) + s(icol,igpt);
 
     // Upward propagation
     for (int ilev=nlay-1; ilev>=0; ilev--) {
-      radn_up(icol,ilev,igpt) = trans(icol,ilev  ,igpt)*radn_up(icol,ilev+1,igpt) + source_up(icol,ilev,igpt);
+      U(icol,ilev,igpt) = t(icol,ilev,igpt)*U(icol,ilev+1,igpt) + u(icol,ilev,igpt);
     }
   );
 
   pool_t::dealloc(temp_dn);
 }
 
-template <typename TransT, typename SfcAlbedoT, typename SourceDnT, typename SourceUpT,
-          typename SourceSfcT, typename RadnUpT, typename RadnDnT>
-void lw_transport_noscat_timing(
-  int ncol, int nlay, int ngpt, TransT const &trans,
-  SfcAlbedoT const &sfc_albedo, SourceDnT const &source_dn, SourceUpT const &source_up,
-  SourceSfcT const &source_sfc, RadnUpT const &radn_up, RadnDnT const &radn_dn)
+template <typename TT, typename AT, typename DT, typename UT,
+          typename ST, typename RUT, typename RDT>
+void example_timing(
+  int ncol, int nlay, int ngpt,
+  TT const &t, AT const &a, DT const &d, UT const &u, ST const &s,
+  RUT const &U, RDT const &D)
 {
-  using scalar_t = typename TransT::non_const_data_type;
-  using layout_t = typename TransT::array_layout;
-  using device_t = typename TransT::device_type;
+  using scalar_t = typename TT::non_const_value_type;
+  using layout_t = typename TT::array_layout;
+  using device_t = typename TT::device_type;
 
   using pool_t = conv::MemPoolSingleton<scalar_t, layout_t, device_t>;
 
@@ -347,16 +380,16 @@ void lw_transport_noscat_timing(
   TIMED_KERNEL(MD_KERNEL2(ncol, ngpt, icol, igpt,
     // Downward propagation
     for (int ilev=1; ilev<nlay+1; ilev++) {
-      radn_dn(icol,ilev,igpt) = trans(icol,ilev-1,igpt)*radn_dn(icol,ilev-1,igpt) + source_dn(icol,ilev-1,igpt);
-      temp_dn(icol,igpt) += radn_dn(icol,ilev,igpt);
+      D(icol,ilev,igpt) = t(icol,ilev-1,igpt)*D(icol,ilev-1,igpt) + d(icol,ilev-1,igpt);
+      temp_dn(icol,igpt) += D(icol,ilev,igpt);
     }
 
     // Surface reflection and emission
-    radn_up(icol,nlay,igpt) = radn_dn(icol,nlay,igpt)*sfc_albedo(icol,igpt) + source_sfc(icol,igpt);
+    U(icol,nlay,igpt) = D(icol,nlay,igpt)*a(icol,igpt) + s(icol,igpt);
 
     // Upward propagation
     for (int ilev=nlay-1; ilev>=0; ilev--) {
-      radn_up(icol,ilev,igpt) = trans(icol,ilev  ,igpt)*radn_up(icol,ilev+1,igpt) + source_up(icol,ilev,igpt);
+      U(icol,ilev,igpt) = t(icol,ilev,igpt)*U(icol,ilev+1,igpt) + u(icol,ilev,igpt);
     }
   ));
 
@@ -366,15 +399,15 @@ void lw_transport_noscat_timing(
 int main(int argc, char** argv)
 {
   Kokkos::initialize(argc, argv); {
-    real2dk sfc_albedo, source_sfc;
-    real3dk trans, source_dn, source_up, radn_up, radn_dn;
-    lw_transport_noscat_orig(1, 2, 3, trans, sfc_albedo, source_dn, source_up, source_sfc, radn_up, radn_dn);
-    lw_transport_noscat_mdrp(1, 2, 3, trans, sfc_albedo, source_dn, source_up, source_sfc, radn_up, radn_dn);
-    lw_transport_noscat_mdrp_layout(1, 2, 3, trans, sfc_albedo, source_dn, source_up, source_sfc, radn_up, radn_dn);
-    lw_transport_noscat_pool(1, 2, 3, trans, sfc_albedo, source_dn, source_up, source_sfc, radn_up, radn_dn);
-    lw_transport_noscat_wrap(1, 2, 3, trans, sfc_albedo, source_dn, source_up, source_sfc, radn_up, radn_dn);
-    lw_transport_noscat_generic(1, 2, 3, trans, sfc_albedo, source_dn, source_up, source_sfc, radn_up, radn_dn);
-    lw_transport_noscat_timing(1, 2, 3, trans, sfc_albedo, source_dn, source_up, source_sfc, radn_up, radn_dn);
+    r2dk a, s;
+    r3dk t, d, u, U, D;
+    example_orig(1, 2, 3, t, a, d, u, s, U, D);
+    example_mdrp(1, 2, 3, t, a, d, u, s, U, D);
+    example_mdrp_layout(1, 2, 3, t, a, d, u, s, U, D);
+    example_pool(1, 2, 3, t, a, d, u, s, U, D);
+    example_wrap(1, 2, 3, t, a, d, u, s, U, D);
+    example_generic(1, 2, 3, t, a, d, u, s, U, D);
+    example_timing(1, 2, 3, t, a, d, u, s, U, D);
   }
   Kokkos::finalize();
   return 0;
