@@ -576,8 +576,8 @@ int main(int argc, char** argv)
     example_generic(ncol, nlay, ngpt, t, a, d, u, s, U, D);
     example_timing(ncol, nlay, ngpt, t, a, d, u, s, U, D);
     pool_t::finalize();
-    yakl::finalize();
   }
   Kokkos::finalize();
+  yakl::finalize();
   return 0;
 }
