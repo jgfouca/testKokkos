@@ -1,5 +1,6 @@
 #include <iostream>
 #include <string>
+#include <vector>
 #include <Kokkos_Core.hpp>
 #include <Kokkos_OffsetView.hpp>
 #include "YAKL.h"
@@ -27,21 +28,25 @@ using HostDevice =
     });                                                                 \
   }
 
-template <class T, int rank, int myMem> using FArray = yakl::Array<T,rank,myMem,yakl::styleFortran>;
+#define COMPARE_ALL_WRAP(yobjs, kobjs) conv::compare_all_yakl_to_kokkos(yobjs, kobjs)
+
+template <class T, int rank, int myMem>
+using FArray = yakl::Array<T,rank,myMem,yakl::styleFortran>;
 
 using r1d = FArray<double,1,yakl::memDevice>;
 using r2d = FArray<double,2,yakl::memDevice>;
 using r3d = FArray<double,3,yakl::memDevice>;
 
-using layout_t = Kokkos::LayoutRight;
+using layout_t = Kokkos::LayoutLeft;
 using device_t = DefaultDevice;
 
-using r1dk = Kokkos::View<double*,   layout_t, DefaultDevice>;
-using r2dk = Kokkos::View<double**,  layout_t, DefaultDevice>;
-using r3dk = Kokkos::View<double***, layout_t, DefaultDevice>;
+using r1dk = Kokkos::View<double*,   layout_t, device_t>;
+using r2dk = Kokkos::View<double**,  layout_t, device_t>;
+using r3dk = Kokkos::View<double***, layout_t, device_t>;
 
 #define YLAM YAKL_LAMBDA
 #define KLAM KOKKOS_LAMBDA
+#define YL YAKL_AUTO_LABEL
 
 namespace conv {
 
@@ -204,11 +209,76 @@ struct MemPoolSingleton
 
 };
 
+template <typename YArray, typename KView>
+void compare_yakl_to_kokkos(const YArray& yarray, const KView& kview, bool index_data=false)
+{
+  using yakl::intrinsics::size;
+  using LeftHostView = Kokkos::View<typename KView::non_const_data_type, Kokkos::LayoutLeft, HostDevice>;
+
+  constexpr auto krank = KView::rank;
+  const auto yrank = yarray.get_rank();
+
+  assert(krank == yrank);
+
+  Kokkos::LayoutLeft llayout;
+  for (auto r = 0; r < krank; ++r) {
+    llayout.dimension[r] = kview.layout().dimension[r];
+  }
+  LeftHostView hkview("read_data", llayout);
+  Kokkos::deep_copy(hkview, kview);
+
+  assert(kview.is_allocated() == yakl::intrinsics::allocated(yarray));
+  if (!kview.is_allocated()) {
+    // we're done
+    return;
+  }
+
+  auto hyarray = yarray.createHostCopy();
+
+  for (auto r = 0; r < krank; ++r) {
+    assert(kview.extent(r) == size(yarray,r+1));
+  }
+
+  auto total_size = kview.size();
+  for (auto i = 0; i < total_size; ++i) {
+    const auto kdata = hkview.data()[i];
+    const auto ydata = hyarray.data()[i];
+    if (index_data) {
+      if (kdata < 0 && ydata <= 0) {
+        // pass
+      }
+      else {
+        assert((kdata + (index_data ? 1 : 0)) == ydata);
+      }
+    }
+    else {
+      assert(kdata == ydata);
+    }
+  }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// example is lw_transport_noscat
+template <typename YArray, typename KView>
+void compare_all_yakl_to_kokkos(const std::vector<YArray>& yarrays, const std::vector<KView>& kviews)
+{
+  assert(yarrays.size() == kviews.size());
+  for (size_t i = 0; i < yarrays.size(); ++i) {
+    compare_yakl_to_kokkos(yarrays[i], kviews[i]);
+  }
+}
 
+}
+
+////////////////////////////////////////////////////////////////////////////
+// example is lw_transport_noscat
+// inputs:
+//   ncol, nlay, ngpt (dimension sizes)
+//   t, a, d, u, s (fields)
+// output fields: U, D
+// typedefs:
+//   layout_t = Kokkos::LayoutLeft;
+//   device_t = DefaultDevice;
+//   r[2|3]d  = yakl::Array<T, [2|3], yakl::memDevice, yakl::styleFortran>;
+//   r[2|3]dk = Kokkos::View<double**[*], layout_t, device_t>;
 void example_orig(
   int ncol, int nlay, int ngpt,
   r3d const &t, r2d const &a, r3d const &d, r3d const &u, r2d const &s,
@@ -216,24 +286,26 @@ void example_orig(
 {
   using yakl::fortran::parallel_for;
   using yakl::fortran::SimpleBounds;
-  r2d temp_dn("tmp_dn", ncol, ngpt);
-  parallel_for( YAKL_AUTO_LABEL() , SimpleBounds<2>(ngpt,ncol) , YLAM(int igpt, int icol) {
+
+  r2d temp_dn("tmp_dn", ncol, ngpt); // temporary work array
+  parallel_for(YL(), SimpleBounds<2>(ngpt,ncol), YLAM(int k, int i) {
     // Downward propagation
-    for (int ilev=2; ilev<=nlay+1; ilev++) {
-      D(icol,ilev,igpt) = t(icol,ilev-1,igpt)*D(icol,ilev-1,igpt) + d(icol,ilev-1,igpt);
-      temp_dn(icol,igpt) += D(icol,ilev,igpt);
+    for (int j=2; j<=nlay+1; j++) {
+      D(i,j,k) = t(i,j-1,k)*D(i,j-1,k) + d(i,j-1,k);
+      temp_dn(i,k) += D(i,j,k);
     }
 
     // Surface reflection and emission
-    U(icol,nlay+1,igpt) = D(icol,nlay+1,igpt)*a(icol,igpt) + s(icol,igpt);
+    U(i,nlay+1,k) = D(i,nlay+1,k)*a(i,k) + s(i,k);
 
     // Upward propagation
-    for (int ilev=nlay; ilev>=1; ilev--) {
-      U(icol,ilev,igpt) = t(icol,ilev,igpt)*U(icol,ilev+1,igpt) + u(icol,ilev,igpt);
+    for (int j=nlay; j>=1; j--) {
+      U(i,j,k) = t(i,j,k)*U(i,j+1,k) + u(i,j,k);
     }
   });
 }
 
+////////////////////////////////////////////////////////////////////////////
 void example_final(
   int ncol, int nlay, int ngpt,
   r3d const &t, r2d const &a, r3d const &d, r3d const &u, r2d const &s,
@@ -241,128 +313,140 @@ void example_final(
 {
   using yakl::fortran::parallel_for;
   using yakl::fortran::SimpleBounds;
-  r2d temp_dn("tmp_dn", ncol, ngpt);
-  TIMED_KERNEL(parallel_for( YAKL_AUTO_LABEL() , SimpleBounds<2>(ngpt,ncol) , YLAM(int igpt, int icol) {
+
+  r2d temp_dn("tmp_dn", ncol, ngpt); // temporary work array
+  TIMED_KERNEL(
+  parallel_for(YL(), SimpleBounds<2>(ngpt,ncol), YLAM(int k, int i) {
     // Downward propagation
-    for (int ilev=2; ilev<=nlay+1; ilev++) {
-      D(icol,ilev,igpt) = t(icol,ilev-1,igpt)*D(icol,ilev-1,igpt) + d(icol,ilev-1,igpt);
-      temp_dn(icol,igpt) += D(icol,ilev,igpt);
+    for (int j=2; j<=nlay+1; j++) {
+      D(i,j,k) = t(i,j-1,k)*D(i,j-1,k) + d(i,j-1,k);
+      temp_dn(i,k) += D(i,j,k);
     }
 
     // Surface reflection and emission
-    U(icol,nlay+1,igpt) = D(icol,nlay+1,igpt)*a(icol,igpt) + s(icol,igpt);
+    U(i,nlay+1,k) = D(i,nlay+1,k)*a(i,k) + s(i,k);
 
     // Upward propagation
-    for (int ilev=nlay; ilev>=1; ilev--) {
-      U(icol,ilev,igpt) = t(icol,ilev,igpt)*U(icol,ilev+1,igpt) + u(icol,ilev,igpt);
+    for (int j=nlay; j>=1; j--) {
+      U(i,j,k) = t(i,j,k)*U(i,j+1,k) + u(i,j,k);
     }
   }));
 }
 
+////////////////////////////////////////////////////////////////////////////
 void example_orig(
   int ncol, int nlay, int ngpt,
   r3dk const &t, r2dk const &a, r3dk const &d, r3dk const &u, r2dk const &s,
   r3dk const &U, r3dk const &D)
 {
+  using Kokkos::parallel_for;
   using exe_space_t = Kokkos::DefaultExecutionSpace;
-  using MDRPR_t = Kokkos::MDRangePolicy<exe_space_t, Kokkos::Rank<2, Kokkos::Iterate::Left, Kokkos::Iterate::Right> >;
+  using MDRPR_t = Kokkos::MDRangePolicy<exe_space_t,
+    Kokkos::Rank<2, Kokkos::Iterate::Left, Kokkos::Iterate::Right> >;
 
   r2dk temp_dn("temp_dn", ncol, ngpt);
-  Kokkos::parallel_for( MDRPR_t({0, 0}, {ngpt,ncol}) , KLAM(int igpt, int icol) {
+  parallel_for(MDRPR_t({0, 0}, {ngpt,ncol}), KLAM(int k, int i) {
     // Downward propagation
-    for (int ilev=1; ilev<nlay+1; ilev++) {
-      D(icol,ilev,igpt) = t(icol,ilev-1,igpt)*D(icol,ilev-1,igpt) + d(icol,ilev-1,igpt);
-      temp_dn(icol,igpt) += D(icol,ilev,igpt);
+    for (int j=1; j<nlay+1; j++) {
+      D(i,j,k) = t(i,j-1,k)*D(i,j-1,k) + d(i,j-1,k);
+      temp_dn(i,k) += D(i,j,k);
     }
 
     // Surface reflection and emission
-    U(icol,nlay,igpt) = D(icol,nlay,igpt)*a(icol,igpt) + s(icol,igpt);
+    U(i,nlay,k) = D(i,nlay,k)*a(i,k) + s(i,k);
 
     // Upward propagation
-    for (int ilev=nlay-1; ilev>=0; ilev--) {
-      U(icol,ilev,igpt) = t(icol,ilev,igpt)*U(icol,ilev+1,igpt) + u(icol,ilev,igpt);
+    for (int j=nlay-1; j>=0; j--) {
+      U(i,j,k) = t(i,j,k)*U(i,j+1,k) + u(i,j,k);
     }
   });
 }
 
+////////////////////////////////////////////////////////////////////////////
 void example_mdrp(
   int ncol, int nlay, int ngpt,
   r3dk const &t, r2dk const &a, r3dk const &d, r3dk const &u, r2dk const &s,
   r3dk const &U, r3dk const &D)
 {
-  using mdrp_t  = typename conv::MDRP<>;
+  using Kokkos::parallel_for;
+  using mdrp_t = typename conv::MDRP<>;
 
   r2dk temp_dn("temp_dn", ncol, ngpt);
-  Kokkos::parallel_for( mdrp_t::template get<2>({ngpt,ncol}) , KLAM(int igpt, int icol) {
+  parallel_for(mdrp_t::template get<2>({ngpt,ncol}), KLAM(int k, int i) {
     // Downward propagation
-    for (int ilev=1; ilev<nlay+1; ilev++) {
-      D(icol,ilev,igpt) = t(icol,ilev-1,igpt)*D(icol,ilev-1,igpt) + d(icol,ilev-1,igpt);
-      temp_dn(icol,igpt) += D(icol,ilev,igpt);
+    for (int j=1; j<nlay+1; j++) {
+      D(i,j,k) = t(i,j-1,k)*D(i,j-1,k) + d(i,j-1,k);
+      temp_dn(i,k) += D(i,j,k);
     }
 
     // Surface reflection and emission
-    U(icol,nlay,igpt) = D(icol,nlay,igpt)*a(icol,igpt) + s(icol,igpt);
+    U(i,nlay,k) = D(i,nlay,k)*a(i,k) + s(i,k);
 
     // Upward propagation
-    for (int ilev=nlay-1; ilev>=0; ilev--) {
-      U(icol,ilev,igpt) = t(icol,ilev,igpt)*U(icol,ilev+1,igpt) + u(icol,ilev,igpt);
+    for (int j=nlay-1; j>=0; j--) {
+      U(i,j,k) = t(i,j,k)*U(i,j+1,k) + u(i,j,k);
     }
   });
 }
 
+////////////////////////////////////////////////////////////////////////////
 void example_mdrp_layout(
   int ncol, int nlay, int ngpt,
   r3dk const &t, r2dk const &a, r3dk const &d, r3dk const &u, r2dk const &s,
   r3dk const &U, r3dk const &D)
 {
-  using mdrp_t  = typename conv::MDRP<layout_t>;
+  using Kokkos::parallel_for;
+  using mdrp_t = typename conv::MDRP<layout_t>;
 
   r2dk temp_dn("temp_dn", ncol, ngpt);
-  Kokkos::parallel_for( mdrp_t::template get<2>({ncol,ngpt}) , KLAM(int icol, int igpt) {
+  parallel_for(mdrp_t::template get<2>({ncol,ngpt}), KLAM(int i, int k) {
     // Downward propagation
-    for (int ilev=1; ilev<nlay+1; ilev++) {
-      D(icol,ilev,igpt) = t(icol,ilev-1,igpt)*D(icol,ilev-1,igpt) + d(icol,ilev-1,igpt);
-      temp_dn(icol,igpt) += D(icol,ilev,igpt);
+    for (int j=1; j<nlay+1; j++) {
+      D(i,j,k) = t(i,j-1,k)*D(i,j-1,k) + d(i,j-1,k);
+      temp_dn(i,k) += D(i,j,k);
     }
 
     // Surface reflection and emission
-    U(icol,nlay,igpt) = D(icol,nlay,igpt)*a(icol,igpt) + s(icol,igpt);
+    U(i,nlay,k) = D(i,nlay,k)*a(i,k) + s(i,k);
 
     // Upward propagation
-    for (int ilev=nlay-1; ilev>=0; ilev--) {
-      U(icol,ilev,igpt) = t(icol,ilev,igpt)*U(icol,ilev+1,igpt) + u(icol,ilev,igpt);
+    for (int j=nlay-1; j>=0; j--) {
+      U(i,j,k) = t(i,j,k)*U(i,j+1,k) + u(i,j,k);
     }
   });
 }
 
+////////////////////////////////////////////////////////////////////////////
 void example_pool(
   int ncol, int nlay, int ngpt,
   r3dk const &t, r2dk const &a, r3dk const &d, r3dk const &u, r2dk const &s,
   r3dk const &U, r3dk const &D)
 {
+  using Kokkos::parallel_for;
   using pool_t = conv::MemPoolSingleton<>;
   using mdrp_t = typename conv::MDRP<layout_t>;
 
   auto temp_dn  = pool_t::template alloc<double>(ncol,ngpt);
-  Kokkos::parallel_for( mdrp_t::template get<2>({ncol,ngpt}) , KLAM(int icol, int igpt) {
+  parallel_for(mdrp_t::template get<2>({ncol,ngpt}), KLAM(int i, int k) {
     // Downward propagation
-    for (int ilev=1; ilev<nlay+1; ilev++) {
-      D(icol,ilev,igpt) = t(icol,ilev-1,igpt)*D(icol,ilev-1,igpt) + d(icol,ilev-1,igpt);
-      temp_dn(icol,igpt) += D(icol,ilev,igpt);
+    for (int j=1; j<nlay+1; j++) {
+      D(i,j,k) = t(i,j-1,k)*D(i,j-1,k) + d(i,j-1,k);
+      temp_dn(i,k) += D(i,j,k);
     }
 
     // Surface reflection and emission
-    U(icol,nlay,igpt) = D(icol,nlay,igpt)*a(icol,igpt) + s(icol,igpt);
+    U(i,nlay,k) = D(i,nlay,k)*a(i,k) + s(i,k);
 
     // Upward propagation
-    for (int ilev=nlay-1; ilev>=0; ilev--) {
-      U(icol,ilev,igpt) = t(icol,ilev,igpt)*U(icol,ilev+1,igpt) + u(icol,ilev,igpt);
+    for (int j=nlay-1; j>=0; j--) {
+      U(i,j,k) = t(i,j,k)*U(i,j+1,k) + u(i,j,k);
     }
   });
 
   pool_t::dealloc(temp_dn);
 }
 
+////////////////////////////////////////////////////////////////////////////
 void example_wrap(
   int ncol, int nlay, int ngpt,
   r3dk const &t, r2dk const &a, r3dk const &d, r3dk const &u, r2dk const &s,
@@ -371,25 +455,26 @@ void example_wrap(
   using pool_t = conv::MemPoolSingleton<>;
 
   auto temp_dn  = pool_t::template alloc<double>(ncol,ngpt);
-  MD_KERNEL2(ncol, ngpt, icol, igpt,
+  MD_KERNEL2(ncol, ngpt, i, k,
     // Downward propagation
-    for (int ilev=1; ilev<nlay+1; ilev++) {
-      D(icol,ilev,igpt) = t(icol,ilev-1,igpt)*D(icol,ilev-1,igpt) + d(icol,ilev-1,igpt);
-      temp_dn(icol,igpt) += D(icol,ilev,igpt);
+    for (int j=1; j<nlay+1; j++) {
+      D(i,j,k) = t(i,j-1,k)*D(i,j-1,k) + d(i,j-1,k);
+      temp_dn(i,k) += D(i,j,k);
     }
 
     // Surface reflection and emission
-    U(icol,nlay,igpt) = D(icol,nlay,igpt)*a(icol,igpt) + s(icol,igpt);
+    U(i,nlay,k) = D(i,nlay,k)*a(i,k) + s(i,k);
 
     // Upward propagation
-    for (int ilev=nlay-1; ilev>=0; ilev--) {
-      U(icol,ilev,igpt) = t(icol,ilev,igpt)*U(icol,ilev+1,igpt) + u(icol,ilev,igpt);
+    for (int j=nlay-1; j>=0; j--) {
+      U(i,j,k) = t(i,j,k)*U(i,j+1,k) + u(i,j,k);
     }
   );
 
   pool_t::dealloc(temp_dn);
 }
 
+////////////////////////////////////////////////////////////////////////////
 template <typename TT, typename AT, typename DT, typename UT,
           typename ST, typename RUT, typename RDT>
 void example_generic(
@@ -400,30 +485,30 @@ void example_generic(
   using scalar_t = typename TT::non_const_value_type;
   using layout_t = typename TT::array_layout;
   using device_t = typename TT::device_type;
-
-  using pool_t = conv::MemPoolSingleton<scalar_t, layout_t, device_t>;
+  using pool_t   = conv::MemPoolSingleton<scalar_t, layout_t, device_t>;
 
   auto temp_dn  = pool_t::template alloc<scalar_t>(ncol,ngpt);
 
-  MD_KERNEL2(ncol, ngpt, icol, igpt,
+  MD_KERNEL2(ncol, ngpt, i, k,
     // Downward propagation
-    for (int ilev=1; ilev<nlay+1; ilev++) {
-      D(icol,ilev,igpt) = t(icol,ilev-1,igpt)*D(icol,ilev-1,igpt) + d(icol,ilev-1,igpt);
-      temp_dn(icol,igpt) += D(icol,ilev,igpt);
+    for (int j=1; j<nlay+1; j++) {
+      D(i,j,k) = t(i,j-1,k)*D(i,j-1,k) + d(i,j-1,k);
+      temp_dn(i,k) += D(i,j,k);
     }
 
     // Surface reflection and emission
-    U(icol,nlay,igpt) = D(icol,nlay,igpt)*a(icol,igpt) + s(icol,igpt);
+    U(i,nlay,k) = D(i,nlay,k)*a(i,k) + s(i,k);
 
     // Upward propagation
-    for (int ilev=nlay-1; ilev>=0; ilev--) {
-      U(icol,ilev,igpt) = t(icol,ilev,igpt)*U(icol,ilev+1,igpt) + u(icol,ilev,igpt);
+    for (int j=nlay-1; j>=0; j--) {
+      U(i,j,k) = t(i,j,k)*U(i,j+1,k) + u(i,j,k);
     }
   );
 
   pool_t::dealloc(temp_dn);
 }
 
+////////////////////////////////////////////////////////////////////////////
 template <typename TT, typename AT, typename DT, typename UT,
           typename ST, typename RUT, typename RDT>
 void example_timing(
@@ -439,19 +524,19 @@ void example_timing(
 
   auto temp_dn  = pool_t::template alloc<scalar_t>(ncol,ngpt);
 
-  TIMED_KERNEL(MD_KERNEL2(ncol, ngpt, icol, igpt,
+  TIMED_KERNEL(MD_KERNEL2(ncol, ngpt, i, k,
     // Downward propagation
-    for (int ilev=1; ilev<nlay+1; ilev++) {
-      D(icol,ilev,igpt) = t(icol,ilev-1,igpt)*D(icol,ilev-1,igpt) + d(icol,ilev-1,igpt);
-      temp_dn(icol,igpt) += D(icol,ilev,igpt);
+    for (int j=1; j<nlay+1; j++) {
+      D(i,j,k) = t(i,j-1,k)*D(i,j-1,k) + d(i,j-1,k);
+      temp_dn(i,k) += D(i,j,k);
     }
 
     // Surface reflection and emission
-    U(icol,nlay,igpt) = D(icol,nlay,igpt)*a(icol,igpt) + s(icol,igpt);
+    U(i,nlay,k) = D(i,nlay,k)*a(i,k) + s(i,k);
 
     // Upward propagation
-    for (int ilev=nlay-1; ilev>=0; ilev--) {
-      U(icol,ilev,igpt) = t(icol,ilev,igpt)*U(icol,ilev+1,igpt) + u(icol,ilev,igpt);
+    for (int j=nlay-1; j>=0; j--) {
+      U(i,j,k) = t(i,j,k)*U(i,j+1,k) + u(i,j,k);
     }
   ));
 
@@ -461,15 +546,28 @@ void example_timing(
 int main(int argc, char** argv)
 {
   Kokkos::initialize(argc, argv); {
+    yakl::init();
     using pool_t = conv::MemPoolSingleton<>;
     pool_t::init(10000);
     int ncol = 8, nlay = 12, ngpt = 14;
+    // kokkos arrays
     r2dk a("a", ncol, ngpt), s("s", ncol, ngpt);
     r3dk t("t", ncol, nlay, ngpt),
       d("d", ncol, nlay, ngpt),
       u("u", ncol, nlay, ngpt),
       U("U", ncol, nlay+1, ngpt),
       D("D", ncol, nlay+1, ngpt);
+    // yakl arrays
+    r2d ay("a", ncol, ngpt), sy("s", ncol, ngpt);
+    r3d ty("t", ncol, nlay, ngpt),
+      dy("d", ncol, nlay, ngpt),
+      uy("u", ncol, nlay, ngpt),
+      Uy("U", ncol, nlay+1, ngpt),
+      Dy("D", ncol, nlay+1, ngpt);
+    example_final(ncol, nlay, ngpt, ty, ay, dy, uy, sy, Uy, Dy);
+    example_timing(ncol, nlay, ngpt, t, a, d, u, s, U, D);
+    COMPARE_ALL_WRAP(std::vector<r3d>({Uy, Dy}),
+                     std::vector<r3dk>({U, D}));
     example_orig(ncol, nlay, ngpt, t, a, d, u, s, U, D);
     example_mdrp(ncol, nlay, ngpt, t, a, d, u, s, U, D);
     example_mdrp_layout(ncol, nlay, ngpt, t, a, d, u, s, U, D);
@@ -478,6 +576,7 @@ int main(int argc, char** argv)
     example_generic(ncol, nlay, ngpt, t, a, d, u, s, U, D);
     example_timing(ncol, nlay, ngpt, t, a, d, u, s, U, D);
     pool_t::finalize();
+    yakl::finalize();
   }
   Kokkos::finalize();
   return 0;
