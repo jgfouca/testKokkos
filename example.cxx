@@ -564,10 +564,13 @@ int main(int argc, char** argv)
       uy("u", ncol, nlay, ngpt),
       Uy("U", ncol, nlay+1, ngpt),
       Dy("D", ncol, nlay+1, ngpt);
+    // call both versions
     example_final(ncol, nlay, ngpt, ty, ay, dy, uy, sy, Uy, Dy);
     example_timing(ncol, nlay, ngpt, t, a, d, u, s, U, D);
+    // validate
     COMPARE_ALL_WRAP(std::vector<r3d>({Uy, Dy}),
                      std::vector<r3dk>({U, D}));
+
     example_orig(ncol, nlay, ngpt, t, a, d, u, s, U, D);
     example_mdrp(ncol, nlay, ngpt, t, a, d, u, s, U, D);
     example_mdrp_layout(ncol, nlay, ngpt, t, a, d, u, s, U, D);
@@ -575,6 +578,7 @@ int main(int argc, char** argv)
     example_wrap(ncol, nlay, ngpt, t, a, d, u, s, U, D);
     example_generic(ncol, nlay, ngpt, t, a, d, u, s, U, D);
     example_timing(ncol, nlay, ngpt, t, a, d, u, s, U, D);
+
     pool_t::finalize();
   }
   Kokkos::finalize();
