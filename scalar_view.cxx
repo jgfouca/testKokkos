@@ -17,7 +17,9 @@ int main(int argc, char** argv)
         view1() = 42;
     });
 
-    cout << view1() << endl;
+    auto view1m = Kokkos::create_mirror_view(view1);
+    Kokkos::deep_copy(view1m, view1);
+    cout << view1m() << endl;
   }
   Kokkos::finalize();
   return 0;
